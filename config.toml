@@ -38,9 +38,7 @@ size_list = ["regular"]
 api_timeout = 30
 
 # 是否使用合并转发(聊天记录)格式发送图片
-# 注意: 发送多张图片的合并转发消息可能会超时
-# 如果遇到超时问题，可以修改 MaiBot-Napcat-Adapter/src/response_pool.py:11 中的 timeout 参数
-# 将默认值从 60 秒调整为更大的值（如 120 秒），或者设置 use_forward_message = false 使用逐条发送
+# 注意: 多图发送可能会失败，建议一次1-3张图最好
 use_forward_message = true
 
 # 图片代理服务器

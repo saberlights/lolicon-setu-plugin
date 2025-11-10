@@ -16,7 +16,7 @@ Lolicon色图插件 - Lolicon Setu Plugin
 - 灵活的配置选项
 
 Author: Claude
-Version: 2.1.0
+Version: 2.1.1
 """
 
 from typing import List, Tuple, Type, Any, Optional, Dict
@@ -44,8 +44,16 @@ class LoliconAPI:
     # API端点
     API_ENDPOINT = "https://api.lolicon.app/setu/v2"
 
+    # API限制常量
+    MAX_CONCURRENT_REQUESTS = 5  # 最大并发请求数
+    MAX_NUM_PER_REQUEST = 20  # 单次请求最大图片数
+    MIN_NUM_PER_REQUEST = 1  # 单次请求最小图片数
+    MAX_UID_COUNT = 20  # 最大UID数量
+    MAX_TAG_GROUPS = 3  # 最大标签组数（AND条件）
+
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
+        self.semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
 
     async def fetch_setu(
         self,
@@ -84,19 +92,19 @@ class LoliconAPI:
         """
         params = {
             "r18": r18,
-            "num": min(max(1, num), 20),
+            "num": min(max(self.MIN_NUM_PER_REQUEST, num), self.MAX_NUM_PER_REQUEST),
             "proxy": proxy,
             "dsc": dsc,
             "excludeAI": exclude_ai,
         }
 
         if uid:
-            params["uid"] = uid[:20]  # 最多20个
+            params["uid"] = uid[:self.MAX_UID_COUNT]
         if keyword:
             params["keyword"] = keyword
         if tag:
             # 将二维数组转换为字符串数组（用|连接）
-            params["tag"] = ["|".join(t) if isinstance(t, list) else t for t in tag[:3]]  # 最多3个AND条件
+            params["tag"] = ["|".join(t) if isinstance(t, list) else t for t in tag[:self.MAX_TAG_GROUPS]]
         if size:
             params["size"] = size
         if date_after:
@@ -107,30 +115,47 @@ class LoliconAPI:
             params["aspectRatio"] = aspect_ratio
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.API_ENDPOINT, json=params, timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        # 检查API是否返回错误
-                        if result.get("error"):
-                            logger.error(f"API返回错误: {result['error']}")
-                            return {"error": result["error"], "data": []}
-                        return result
-                    else:
-                        logger.error(f"API请求失败，状态码: {resp.status}")
-                        return {"error": f"HTTP {resp.status}", "data": []}
+            async with self.semaphore:  # 并发控制
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.API_ENDPOINT, json=params, timeout=aiohttp.ClientTimeout(total=self.timeout)
+                    ) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            # 检查API是否返回错误
+                            if result.get("error"):
+                                logger.error(f"API返回错误: {result['error']}")
+                                return {"error": result["error"], "data": []}
+                            return result
+                        else:
+                            logger.error(f"API请求失败，状态码: {resp.status}")
+                            return {"error": f"HTTP {resp.status}", "data": []}
         except asyncio.TimeoutError:
             logger.error("API请求超时")
             return {"error": "请求超时", "data": []}
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"网络连接失败: {str(e)}")
+            return {"error": "网络连接失败，请检查网络", "data": []}
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"API响应错误: {str(e)}")
+            return {"error": f"API响应错误: {e.status}", "data": []}
+        except aiohttp.ContentTypeError as e:
+            logger.error(f"API返回数据格式错误: {str(e)}")
+            return {"error": "API返回数据格式错误", "data": []}
         except Exception as e:
-            logger.error(f"API请求异常: {str(e)}")
+            logger.error(f"API请求异常: {str(e)}", exc_info=True)
             return {"error": str(e), "data": []}
 
 
 class SetuCommand(BaseCommand):
     """色图获取命令"""
+
+    # 类常量
+    MAX_COOLDOWN_CACHE_SIZE = 1000  # 冷却缓存最大容量
+    COOLDOWN_CLEANUP_THRESHOLD = 1200  # 触发清理的阈值
+
+    # 长宽比验证正则
+    ASPECT_RATIO_PATTERN = re.compile(r"^(gt|gte|lt|lte|eq)(\d+(?:\.\d+)?)(gt|gte|lt|lte|eq)?(\d+(?:\.\d+)?)?$")
 
     command_name = "setu"
     command_description = "从Lolicon API获取色图"
@@ -232,8 +257,10 @@ class SetuCommand(BaseCommand):
             # 冷却检查
             user_id = self.message.message_info.user_info.user_id
             cooldown = self.get_config("features.cooldown_seconds", 10)
-            if not self._check_cooldown(user_id, cooldown):
-                await self.send_text(f"⏰ 冷却中，请 {cooldown} 秒后再试")
+            cooldown_result = self._check_cooldown(user_id, cooldown)
+            if not cooldown_result["ready"]:
+                remaining = cooldown_result["remaining"]
+                await self.send_text(f"⏰ 冷却中，还需等待 {remaining} 秒")
                 return False, "冷却中", True
 
             # 解析参数并获取图片
@@ -288,7 +315,7 @@ class SetuCommand(BaseCommand):
 
             # 数量
             if arg_lower.isdigit():
-                params["num"] = min(max(1, int(arg_lower)), 20)
+                params["num"] = min(max(LoliconAPI.MIN_NUM_PER_REQUEST, int(arg_lower)), LoliconAPI.MAX_NUM_PER_REQUEST)
             # R18
             elif arg_lower == "r18":
                 if self.get_config("features.allow_r18", False):
@@ -327,7 +354,7 @@ class SetuCommand(BaseCommand):
                 except ValueError:
                     logger.warning(f"无效的UID: {arg}")
             # 长宽比表达式
-            elif re.match(r"((gt|gte|lt|lte|eq)[\d.]+){1,2}", arg_lower):
+            elif self._validate_aspect_ratio(arg_lower):
                 params["aspect_ratio"] = arg_lower
             # 关键词搜索 - 新格式（纯文本）
             elif arg_lower not in reserved_keywords:
@@ -338,6 +365,43 @@ class SetuCommand(BaseCommand):
                     params["keyword"] = arg
 
         return params
+
+    def _validate_aspect_ratio(self, ratio_str: str) -> bool:
+        """验证长宽比表达式格式
+
+        Args:
+            ratio_str: 长宽比表达式，如 "gt1.5", "lt0.8", "gt1.5lt2.0"
+
+        Returns:
+            bool: 是否有效
+        """
+        if not ratio_str:
+            return False
+
+        # 使用正则验证格式
+        match = self.ASPECT_RATIO_PATTERN.match(ratio_str)
+        if not match:
+            return False
+
+        # 验证数值范围（长宽比应该在合理范围内，如 0.1 到 10）
+        groups = match.groups()
+        try:
+            ratio1 = float(groups[1])
+            if ratio1 < 0.1 or ratio1 > 10:
+                logger.warning(f"长宽比数值超出合理范围: {ratio1}")
+                return False
+
+            # 如果有第二个条件
+            if groups[2] and groups[3]:
+                ratio2 = float(groups[3])
+                if ratio2 < 0.1 or ratio2 > 10:
+                    logger.warning(f"长宽比数值超出合理范围: {ratio2}")
+                    return False
+
+            return True
+        except (ValueError, IndexError) as e:
+            logger.warning(f"长宽比验证失败: {str(e)}")
+            return False
 
     async def _fetch_setu(self, params: Dict[str, Any]) -> bool:
         """获取色图"""
@@ -368,7 +432,7 @@ class SetuCommand(BaseCommand):
             return False
 
         # 使用合并转发格式发送
-        if use_forward and len(data) > 0:
+        if use_forward:
             forward_messages = []
             # 使用bot的QQ和昵称
             bot_qq = str(global_config.bot.qq_account)
@@ -462,17 +526,55 @@ class SetuCommand(BaseCommand):
 
         return True
 
-    def _check_cooldown(self, user_id: str, cooldown: int) -> bool:
-        """检查冷却时间"""
+    def _check_cooldown(self, user_id: str, cooldown: int) -> dict:
+        """检查冷却时间
+
+        Returns:
+            dict: {"ready": bool, "remaining": int} ready表示是否可以执行，remaining表示剩余冷却时间（秒）
+        """
+        # 定期清理过期缓存
+        self._cleanup_cooldown_cache(cooldown)
+
         if user_id not in self.cooldown_cache:
-            return True
+            return {"ready": True, "remaining": 0}
 
         last_use = self.cooldown_cache[user_id]
-        return time.time() - last_use >= cooldown
+        elapsed = time.time() - last_use
+
+        if elapsed >= cooldown:
+            return {"ready": True, "remaining": 0}
+        else:
+            remaining = int(cooldown - elapsed) + 1  # 向上取整
+            return {"ready": False, "remaining": remaining}
 
     def _update_cooldown(self, user_id: str):
         """更新冷却时间"""
         self.cooldown_cache[user_id] = time.time()
+
+    def _cleanup_cooldown_cache(self, cooldown: int):
+        """清理过期的冷却缓存"""
+        # 当缓存超过阈值时才清理
+        if len(self.cooldown_cache) <= self.COOLDOWN_CLEANUP_THRESHOLD:
+            return
+
+        current_time = time.time()
+        # 清理所有已过冷却期的条目
+        expired_users = [
+            user_id for user_id, last_use in self.cooldown_cache.items()
+            if current_time - last_use >= cooldown
+        ]
+
+        for user_id in expired_users:
+            del self.cooldown_cache[user_id]
+
+        # 如果清理后仍然超过最大容量，删除最旧的条目
+        if len(self.cooldown_cache) > self.MAX_COOLDOWN_CACHE_SIZE:
+            sorted_items = sorted(self.cooldown_cache.items(), key=lambda x: x[1])
+            excess_count = len(self.cooldown_cache) - self.MAX_COOLDOWN_CACHE_SIZE
+            for user_id, _ in sorted_items[:excess_count]:
+                del self.cooldown_cache[user_id]
+
+            logger.info(f"冷却缓存已清理 {len(expired_users) + excess_count} 个过期/过量条目")
 
 
 @register_plugin
@@ -492,9 +594,7 @@ class LoliconSetuPlugin(BasePlugin):
     - 合并转发格式
 
     注意事项:
-    - 发送多张图片的合并转发消息可能会超时
-    - 如遇超时，可修改 MaiBot-Napcat-Adapter/src/response_pool.py:11 的 timeout 参数
-    - 或在配置中设置 use_forward_message = false 使用逐条发送
+    - 多图发送可能会失败，建议一次1-3张图最好
     """
 
     # 插件基本信息
@@ -525,7 +625,7 @@ class LoliconSetuPlugin(BasePlugin):
             "use_forward_message": ConfigField(
                 type=bool,
                 default=True,
-                description="是否使用合并转发(聊天记录)格式发送图片。注意: 发送多张图片可能超时，如遇超时可修改 MaiBot-Napcat-Adapter/src/response_pool.py:11 的 timeout 参数(默认60秒)，或设置为 false 使用逐条发送",
+                description="是否使用合并转发(聊天记录)格式发送图片。注意: 多图发送可能会失败，建议一次1-3张图最好",
             ),
             "proxy": ConfigField(type=str, default="i.pixiv.re", description="图片代理服务器"),
         },
@@ -533,9 +633,47 @@ class LoliconSetuPlugin(BasePlugin):
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件包含的组件列表"""
+        # 验证配置
+        self._validate_config()
+
         components = []
 
         if self.get_config("components.enable_command", True):
             components.append((SetuCommand.get_command_info(), SetuCommand))
 
         return components
+
+    def _validate_config(self):
+        """验证配置的有效性"""
+        # 验证 default_num
+        default_num = self.get_config("features.default_num", 1)
+        if not isinstance(default_num, int) or default_num < 1 or default_num > 20:
+            logger.warning(f"配置 default_num 无效: {default_num}，将使用默认值 1")
+            # 这里无法直接修改配置，只能记录警告
+
+        # 验证 cooldown_seconds
+        cooldown = self.get_config("features.cooldown_seconds", 10)
+        if not isinstance(cooldown, (int, float)) or cooldown < 0:
+            logger.warning(f"配置 cooldown_seconds 无效: {cooldown}，将使用默认值 10")
+
+        # 验证 api_timeout
+        timeout = self.get_config("features.api_timeout", 30)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            logger.warning(f"配置 api_timeout 无效: {timeout}，将使用默认值 30")
+
+        # 验证 size_list
+        size_list = self.get_config("features.size_list", ["regular"])
+        valid_sizes = {"original", "regular", "small", "thumb", "mini"}
+        if not isinstance(size_list, list) or not size_list:
+            logger.warning(f"配置 size_list 无效: {size_list}，将使用默认值 ['regular']")
+        else:
+            invalid_sizes = [s for s in size_list if s not in valid_sizes]
+            if invalid_sizes:
+                logger.warning(f"配置 size_list 包含无效值: {invalid_sizes}，有效值为: {valid_sizes}")
+
+        # 验证 proxy
+        proxy = self.get_config("features.proxy", "i.pixiv.re")
+        if not isinstance(proxy, str) or not proxy.strip():
+            logger.warning(f"配置 proxy 无效或为空: {proxy}，可能导致图片无法访问")
+
+        logger.info("配置校验完成")
