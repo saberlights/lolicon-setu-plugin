@@ -16,11 +16,12 @@ Lolicon色图插件 - Lolicon Setu Plugin
 - 灵活的配置选项
 
 Author: Claude
-Version: 2.1.1
+Version: 2.1.1 (修复版)
 """
 
 from typing import List, Tuple, Type, Any, Optional, Dict
 import asyncio
+import json
 import aiohttp
 import time
 import re
@@ -95,7 +96,7 @@ class LoliconAPI:
             "num": min(max(self.MIN_NUM_PER_REQUEST, num), self.MAX_NUM_PER_REQUEST),
             "proxy": proxy,
             "dsc": dsc,
-            "excludeAI": exclude_ai,
+            "exclude_ai": exclude_ai,  # 修复：使用小写下划线格式
         }
 
         if uid:
@@ -117,11 +118,19 @@ class LoliconAPI:
         try:
             async with self.semaphore:  # 并发控制
                 async with aiohttp.ClientSession() as session:
+                    # 添加自定义headers，避免br编码
+                    headers = {
+                        "Accept-Encoding": "gzip, deflate"  # 移除br，只保留支持的编码
+                    }
                     async with session.post(
-                        self.API_ENDPOINT, json=params, timeout=aiohttp.ClientTimeout(total=self.timeout)
+                        self.API_ENDPOINT, 
+                        json=params, 
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                        headers=headers  # 添加headers参数
                     ) as resp:
                         if resp.status == 200:
-                            result = await resp.json()
+                            raw: bytes = await resp.read()
+                            result = json.loads(raw.decode("utf-8"))
                             # 检查API是否返回错误
                             if result.get("error"):
                                 logger.error(f"API返回错误: {result['error']}")

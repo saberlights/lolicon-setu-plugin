@@ -10,12 +10,10 @@
   "license": "MIT",
   "homepage_url": "https://github.com/saberlights/lolicon-setu-plugin",
   "repository_url": "https://github.com/saberlights/lolicon-setu-plugin",
-
   "host_application": {
     "name": "MaiBot",
     "min_version": "0.11.0"
   },
-
   "keywords": [
     "setu",
     "pixiv",
@@ -31,9 +29,7 @@
     "Entertainment",
     "Image"
   ],
-
   "default_locale": "zh-CN",
-
   "plugin_info": {
     "is_built_in": false,
     "plugin_type": "entertainment",
@@ -93,14 +89,12 @@
       "has_default_config": true
     }
   },
-
   "permissions": [
     "send.image",
     "send.text",
     "send.forward",
     "network.http"
   ],
-
   "changelog": {
     "2.1.1": {
       "date": "2025-11-10",
@@ -134,5 +128,6 @@
         "全新的文档和使用说明"
       ]
     }
-  }
+  },
+  "id": "久远.lolicon-setu-plugin"
 }

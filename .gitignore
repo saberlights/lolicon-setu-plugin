@@ -41,3 +41,4 @@ Thumbs.db
 
 # Config (可能包含敏感信息)
 config.local.toml
+config.toml
